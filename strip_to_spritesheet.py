@@ -11,6 +11,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
 
 def resource_path(relative_path):
+    #Get absolute path to resource, works for dev and for PyInstaller
     try:
         base_path = sys._MEIPASS
     except Exception:
@@ -18,108 +19,119 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def load_font(font_path):
+    #Register custom ttf font with Windows GDI
+    font_path = resource_path(font_path)
     if os.path.exists(font_path):
-        ctypes.windll.gdi32.AddFontResourceExW(font_path, 0x10, 0) 
+        ctypes.windll.gdi32.AddFontResourceExW(font_path, 0x10, 0)
 
 try:
-    myappid = 'adaf.striptospritesheet.v1' 
+    myappid = 'adaf.striptospritesheet.v1'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except:
     pass
 
-class Popup:
-    def __init__(self, text, font, parent):
+class ToolTipManager:
+    #Singleton to manage a single persistent tooltip window
+    def __init__(self, parent):
         self.parent = parent
-        self.tip_window = None
-        self.text = text
-        self.font = font
+        self.tw = ctk.CTkToplevel(self.parent)
+        self.tw.withdraw()
+        self.tw.wm_overrideredirect(True)
+        self.tw.wm_attributes("-topmost", True)
+        #Prevents tooltip from appearing as a separate window in taskbar
+        self.tw.wm_attributes("-toolwindow", True)
+
+        self.frame = ctk.CTkFrame(self.tw, corner_radius=8, fg_color="#333333", border_width=1, border_color="#444444")
+        self.frame.pack()
+        self.label = ctk.CTkLabel(self.frame, text="", text_color="white")
+        self.label.pack(padx=10, pady=5)
+        
         self.visible = False
         self.alpha = 0.0
+        self._fade_job = None
 
-    def show(self, x, y):
-        if self.tip_window:
-            return
-        self.tip_window = tw = ctk.CTkToplevel(self.parent)
-        tw.wm_overrideredirect(True)
-        tw.wm_attributes("-topmost", True)
-        tw.wm_geometry(f"+{x}+{y}")
-        tw.attributes("-alpha", 0.0)
-
-        self.frame = ctk.CTkFrame(tw, corner_radius=8, fg_color="#333333")
-        self.frame.pack()
-        self.label = ctk.CTkLabel(self.frame, text=self.text, font=self.font, text_color="white")
-        self.label.pack(padx=10, pady=5)
-
-        self.alpha = 0.0
+    def show(self, text, font, x, y):
+        #Update and show the existing tooltip window
+        if self._fade_job:
+            self.parent.after_cancel(self._fade_job)
+        
+        self.label.configure(text=text, font=font)
+        self.tw.geometry(f"+{x}+{y}")
+        self.tw.deiconify()
         self.visible = True
         self._fade_in()
 
     def hide(self):
-        if self.tip_window:
-            self.visible = False
-            self._fade_out()
+        #Start the fade out process
+        self.visible = False
+        self._fade_out()
 
     def _fade_in(self):
-        if not self.tip_window or not self.visible:
-            return
-        self.alpha = min(self.alpha + 0.1, 1.0)
-        self.tip_window.attributes("-alpha", self.alpha)
+        #Recursive fade in animation
+        if not self.visible: return
+        self.alpha = min(self.alpha + 0.25, 1.0)
+        self.tw.attributes("-alpha", self.alpha)
         if self.alpha < 1.0:
-            self.tip_window.after(20, self._fade_in)
+            self._fade_job = self.parent.after(10, self._fade_in)
 
     def _fade_out(self):
-        if not self.tip_window:
-            return
-        self.alpha = max(self.alpha - 0.1, 0.0)
-        self.tip_window.attributes("-alpha", self.alpha)
+        #Recursive fade out animation
+        if self.visible: return
+        self.alpha = max(self.alpha - 0.25, 0.0)
+        self.tw.attributes("-alpha", self.alpha)
         if self.alpha > 0.0:
-            self.tip_window.after(20, self._fade_out)
+            self._fade_job = self.parent.after(10, self._fade_out)
         else:
-            if self.tip_window:
-                self.tip_window.destroy()
-                self.tip_window = None
+            self.tw.withdraw()
 
 class ToolTip:
+    #Bridge class to connect widgets to the ToolTipManager
+    manager = None
+
     def __init__(self, widget, text, font):
         self.widget = widget
         self.text = text
         self.font = font
-        self.popup = None
-        self.widget.bind("<Enter>", self.show_tip)
-        self.widget.bind("<Leave>", self.hide_tip)
+        self.widget.bind("<Enter>", self.on_enter)
+        self.widget.bind("<Leave>", self.on_leave)
 
-    def show_tip(self, event=None):
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + 20
-        self.popup = Popup(self.text, self.font, parent=self.widget.winfo_toplevel())
-        self.popup.show(x, y)
+    def on_enter(self, event=None):
+        if not ToolTip.manager:
+            ToolTip.manager = ToolTipManager(self.widget.winfo_toplevel())
+        
+        x = self.widget.winfo_rootx() + 25
+        y = self.widget.winfo_rooty() + 25
+        ToolTip.manager.show(self.text, self.font, x, y)
 
-    def hide_tip(self, event=None):
-        if self.popup:
-            self.popup.hide()
-            self.popup = None
+    def on_leave(self, event=None):
+        if ToolTip.manager:
+            ToolTip.manager.hide()
 
 class SpriteTool(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self.withdraw() #Hide until centered
         load_font("SilverFont.ttf")
         
         self.ui_scale = 0.8
         base_w, base_h = 850, 900 
-        w, h = int(base_w * self.ui_scale), int(base_h * self.ui_scale)
-        self.title("Spritesheet Maker")
-        self.geometry(f"{w}x{h}")
+        self.width = int(base_w * self.ui_scale)
+        self.height = int(base_h * self.ui_scale)
         
+        self.title("Spritesheet Maker")
         self.apply_icon("logo.ico") 
+        
+        self._center_window()
+        
         self.current_strip = None
         self.last_export_path = "" 
         self.preview_scale = 1.0 
         self.preview_origin = (0, 0)
 
+        #Main Layout
         self.main_container = ctk.CTkFrame(self, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True)
 
-        #Left Side
         self.left_panel = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.left_panel.pack(side="left", fill="both", expand=True, padx=20)
 
@@ -139,10 +151,10 @@ class SpriteTool(ctk.CTk):
         self.inputs = {}
         params = [
             ("Cell Width", "16", "Width of one single character frame"),
-            ("Cell Height", "26", "Height of one single character frame"),
-            ("Rows", "10", "Total rows in the final sheet"),
-            ("Cols", "11", "Total columns in the final sheet"),
-            ("Padding", "2", "Empty pixels between each cell")
+            ("Cell Height", "16", "Height of one single character frame"),
+            ("Rows", "4", "Total rows in the final sheet"),
+            ("Cols", "4", "Total columns in the final sheet"),
+            ("Padding", "0", "Empty pixels between each cell")
         ]
 
         for i, (label_text, default, hint) in enumerate(params):
@@ -190,6 +202,7 @@ class SpriteTool(ctk.CTk):
         self.preview_canvas.bind("<ButtonPress-1>", self.start_pan)
         self.preview_canvas.bind("<B1-Motion>", self.pan)
         self.preview_canvas.bind("<ButtonRelease-1>", self.end_pan)
+        self.preview_canvas.bind("<Configure>", lambda e: self._draw_preview())
         self._pan_start = None
 
         self.right_panel = ctk.CTkFrame(self.main_container, width=0, fg_color="#181818") 
@@ -200,10 +213,20 @@ class SpriteTool(ctk.CTk):
         self.zoom_label.pack(side="left", padx=5)
         self.reset_zoom_btn = ctk.CTkButton(controls_frame, text="Reset Zoom", font=self.tip_font, command=self.reset_zoom, width=int(100 * self.ui_scale))
         self.reset_zoom_btn.pack(side="right", padx=5)
+        
+        self.after(10, self.deiconify)
+
+    def _center_window(self):
+        #Calculate coordinates to center window on the screen
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width // 2) - (self.width // 2)
+        y = (screen_height // 2) - (self.height // 2)
+        self.geometry(f"{self.width}x{self.height}+{x}+{y}")
 
     def apply_icon(self, icon_path):
-        if not os.path.isabs(icon_path):
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_path)
+        #Handle icon loading for both source and bundled exe
+        icon_path = resource_path(icon_path)
         if os.path.exists(icon_path):
             try:
                 if icon_path.lower().endswith('.ico'):
@@ -212,9 +235,11 @@ class SpriteTool(ctk.CTk):
                     img = Image.open(icon_path)
                     self.tk_icon = ImageTk.PhotoImage(img)
                     self.iconphoto(False, self.tk_icon)
-            except: pass
+            except:
+                pass
 
     def browse_file(self):
+        #Open file dialog and load image
         filename = filedialog.askopenfilename(filetypes=[("PNG files", "*.png")])
         if filename:
             self.path_entry.delete(0, "end")
@@ -230,6 +255,7 @@ class SpriteTool(ctk.CTk):
                 messagebox.showerror("Invalid Image", f"Unable to load image:\n{e}")
 
     def update_preview(self):
+        #Re-generate the spritesheet based on current input parameters
         try:
             c_w = int(self.inputs["Cell Width"].get() or 0)
             c_h = int(self.inputs["Cell Height"].get() or 0)
@@ -253,6 +279,7 @@ class SpriteTool(ctk.CTk):
         except (ValueError, Exception): pass
 
     def _draw_preview(self): 
+        #Render the generated sheet to the canvas
         w = self.preview_canvas.winfo_width() or 560
         h = self.preview_canvas.winfo_height() or 280
         self.preview_canvas.delete("all")
@@ -267,14 +294,19 @@ class SpriteTool(ctk.CTk):
         
         self.preview_tk = ImageTk.PhotoImage(preview_img)
         
-        draw_x = (w - img_w) // 2 if img_w < w else self.preview_origin[0]
-        draw_y = (h - img_h) // 2 if img_h < h else self.preview_origin[1]
+        draw_x = self.preview_origin[0]
+        draw_y = self.preview_origin[1]
+        if img_w < w:
+            draw_x = (w - img_w) // 2
+        if img_h < h:
+            draw_y = (h - img_h) // 2
 
         self.preview_canvas.create_image(draw_x, draw_y, anchor="nw", image=self.preview_tk)
         self.preview_canvas.configure(scrollregion=(0, 0, max(w, img_w), max(h, img_h)))
         self.zoom_label.configure(text=f"Zoom: {int(self.preview_scale * 100)}%")
 
     def save_sheet(self):
+        #Export generated sheet to file
         if not hasattr(self, 'generated_sheet'): return
         path = self.path_entry.get()
         if not path: return
@@ -289,6 +321,7 @@ class SpriteTool(ctk.CTk):
             messagebox.showerror("Error", str(e))
 
     def show_export_panel(self, out_name):
+        #Show side panel after successful save
         for widget in self.right_panel.winfo_children(): widget.destroy()
         self.right_panel.pack(side="right", fill="both", padx=(0, 20), pady=20, expand=False)
         self.right_panel.configure(width=int(250 * self.ui_scale)) 
@@ -304,6 +337,7 @@ class SpriteTool(ctk.CTk):
                       command=self.right_panel.pack_forget).pack(pady=(20, 5), padx=20, fill="x")
 
     def _on_entry_scroll(self, event, entry):
+        #Allow changing values via mouse scrollwheel
         try: value = int(entry.get())
         except: return
         delta = (1 if event.delta > 0 else -1) * (10 if event.state & 0x4 else 1)
@@ -311,9 +345,11 @@ class SpriteTool(ctk.CTk):
         self.update_preview()
 
     def reset_zoom(self):
+        #Reset zoom to 1:1 scale
         self.preview_scale = 1.0; self.preview_origin = (0, 0); self._draw_preview()
 
     def on_preview_wheel(self, event):
+        #Handle zooming and scrolling in the preview canvas
         if not hasattr(self, "generated_sheet"): return
         if event.state & 0x4: 
             scale_step = 1.2 if event.delta > 0 else 0.8
@@ -327,6 +363,7 @@ class SpriteTool(ctk.CTk):
     def start_pan(self, event): self._pan_start = (event.x, event.y, self.preview_origin[0], self.preview_origin[1])
     def end_pan(self, event): self._pan_start = None
     def pan(self, event):
+        #Handle panning the preview image
         if not self._pan_start: return
         self.preview_origin = (self._pan_start[2] + (event.x - self._pan_start[0]), self._pan_start[3] + (event.y - self._pan_start[1]))
         self._draw_preview()
